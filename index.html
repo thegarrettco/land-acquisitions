@@ -60,6 +60,7 @@
   --band-strong:#0b5d1e;
 
   --land:#e6ebf1;
+  --land-focus:#d3e3f1;
   --chrome-h:76px;
   color-scheme:light;
 }
@@ -91,6 +92,7 @@
 
     --tex-body:none;
     --land:#26313f;
+    --land-focus:#2b4a66;
     --shadow:0 4px 14px rgba(0,0,0,.35);
     color-scheme:dark;
   }
@@ -778,6 +780,31 @@ details summary{cursor:pointer;color:var(--accent-text);font-weight:600}
 .sibling-row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-top:1.75rem;padding-top:1.25rem;border-top:1px solid var(--border)}
 @media (max-width:900px){ .market-map{height:360px} .locator{width:120px} }
 
+
+/* Market zoom transition */
+.usmap .st,.usmap .sweep path,.usmap .lift path{vector-effect:non-scaling-stroke}
+.usmap.zooming{pointer-events:none;overflow:hidden}
+.usmap.zooming .markets,.usmap.zooming .labels,.usmap.zooming .sweep,.usmap.zooming .lift{opacity:0;transition:opacity .22s ease}
+.usmap.zooming.instant .markets,.usmap.zooming.instant .labels,.usmap.zooming.instant .sweep{transition:none}
+.usmap .markets,.usmap .labels,.usmap .sweep{transition:opacity .35s ease}
+.usmap.zooming .land{filter:none}
+.usmap.zooming .st{fill:var(--land)!important;opacity:.55;transition:opacity .45s ease,fill .45s ease}
+.usmap.zooming .st.focus-st{fill:var(--land-focus)!important;opacity:1}
+.zoom-sites circle{stroke:#fff;stroke-width:2.2px;vector-effect:non-scaling-stroke}
+.mk-map-wrap .handoff{position:absolute;inset:0;z-index:1;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:var(--surface);pointer-events:none;transition:opacity .5s ease}
+.mk-map-wrap .handoff svg{width:100%;height:100%;display:block}
+.mk-map-wrap .handoff .markets,.mk-map-wrap .handoff .labels{display:none}
+.mk-map-wrap .market-map{z-index:2;transition:opacity .55s ease,transform .7s cubic-bezier(.2,.8,.2,1)}
+.mk-map-wrap.map-enter .market-map{opacity:0;transform:scale(1.04)}
+.mk-map-wrap.map-enter.has-handoff .market-map{transform:none}
+.mk-map-wrap.map-enter.map-in .market-map{opacity:1;transform:none}
+.mk-map-wrap.map-enter.map-in .handoff{opacity:0}
+.mk-map-wrap .locator{z-index:600;transition:opacity .4s ease .35s}
+.mk-map-wrap.map-enter .locator{opacity:0}
+.mk-map-wrap.map-enter.map-in .locator{opacity:1}
+.view-fade{animation:viewIn .32s ease both}
+@keyframes viewIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
 @media (max-width:900px){
   .tilemap{gap:3px}
   .tile{border-radius:5px;font-size:.6rem}
@@ -1440,7 +1467,7 @@ function freshFilters(){ return { status:"all", path:"all", sale:"all", sort:"sc
 const state = {
   user:null, data:null, view:"today", market:"all", mkState:"all", siteCode:null, siteTab:"zoning",
   filters:freshFilters(), compare:[], drawer:null, lastFocus:null, noteMode:null, verify:{},
-  chat:freshChat(), askSite:null, seq:0, mkLayer:"map", flyIn:false
+  chat:freshChat(), askSite:null, seq:0, mkLayer:"map", landing:false, fadeNext:false, handoff:null, animating:false, zoomOutFrom:null
 };
 function isCorp(){ return !!(state.user && state.user.access === "corporate"); }
 function findSite(code){ return state.data && state.data.sites.find(s => s.code === code); }
@@ -1490,7 +1517,9 @@ function nextRunISO(last, cadence){
   return isoOf(t);
 }
 function setMarket(id){
-  if (state.view === "markets" && id && id !== "all" && id !== state.market) state.flyIn = true;   // the market map flies in from the national view
+  state.navCount = (state.navCount || 0) + 1;
+  if (state.view === "markets" && id && id !== "all" && id !== state.market) state.landing = true;   // the market map fades in once its tiles load
+  if (id !== state.market) state.fadeNext = true;
   state.market = id || "all";
   state.compare = [];
   if (state.view === "site"){ const s = findSite(state.siteCode); if (s && !inScope(s)) state.view = "sites"; }
@@ -1630,13 +1659,17 @@ function renderMain(){
   const fn = VIEWS[state.view] || viewToday;
   $("#main").innerHTML = fn() + `<p class="foot">Land Acquisitions Portal shell v0.3. Sample data parsed from the 27 October 2026 land-hunt packets (Kansas City, St. Louis, South Carolina, Alabama). Long research rows are shortened; the PDF packet has the full text.</p>`;
   applyTitleCase($("#main"));
+  if (state.fadeNext && !reducedMotion()){ const mn = $("#main"); mn.classList.remove("view-fade"); void mn.offsetWidth; mn.classList.add("view-fade"); }
+  state.fadeNext = false;
+  if (state.view === "markets" && state.market === "all" && state.zoomOutFrom){ const from = state.zoomOutFrom; requestAnimationFrame(() => zoomOutFromMarket(from)); }
+  state.zoomOutFrom = null;
   if (state.view === "ask") afterAskRender();
   if (state.view === "markets" && GEO.status !== "ready") loadGeo();
   if (state.view === "markets" && state.market !== "all") initMarketMap();
   if (state.view === "site") initSiteMap();
   if (state.view === "sites" && state.filters.sitesView === "map") initSitesMap();
 }
-function go(view){ state.view = view; render(); scrollToTopAndFocusMain(); }
+function go(view){ state.navCount = (state.navCount || 0) + 1; state.view = view; render(); scrollToTopAndFocusMain(); }
 function openSite(code){
   const s = findSite(code); if (!s) return;
   if (state.market !== "all" && !inScope(s)) state.market = s.mk;
@@ -2402,7 +2435,8 @@ function viewMarketDetail(){
             <button type="button" class="chip${state.mkLayer === "satellite" ? " active" : ""}" data-action="map-layer" data-layer="satellite">Satellite</button>
           </span>
         </div>
-        <div class="mk-map-wrap">
+        <div class="mk-map-wrap${state.landing && !reducedMotion() ? " map-enter" : ""}${state.handoff && state.handoff.id === m.id && !reducedMotion() ? " has-handoff" : ""}">
+          ${state.handoff && state.handoff.id === m.id ? `<div class="handoff" aria-hidden="true">${state.handoff.svg}</div>` : ""}
           <div id="marketMap" class="market-map" aria-label="Map of the ${esc(plural(list.length,"site"))} in ${esc(m.name)}"></div>
           <div class="locator" id="locator" aria-hidden="true">${locatorSvg(m)}</div>
         </div>
@@ -2489,11 +2523,24 @@ function initMarketMap(){
   if (!el || !m) return;
   const list = scopedSites().filter(s => s.lat != null);
   if (!window.L){ el.classList.add("market-empty"); el.innerHTML = `<div class="empty" style="border:0;background:transparent"><strong>The Map Needs a Connection</strong>Leaflet and the map tiles load from the web. The sites are listed below.</div>`; return; }
-  const fly = state.flyIn && !reducedMotion();
-  state.flyIn = false;
-  activeMap = L.map(el, { scrollWheelZoom:false, zoomControl:true, zoomSnap:.25 });
+  const landing = state.landing && !reducedMotion();
+  state.landing = false;
+  activeMap = L.map(el, { scrollWheelZoom:false, zoomControl:true, zoomSnap:.25, fadeAnimation:false });
   const style = state.mkLayer === "satellite" ? MARKET_TILES.satellite : (prefersDark() ? MARKET_TILES.mapDark : MARKET_TILES.map);
-  L.tileLayer(style.base, { maxZoom:19, attribution:style.attribution }).addTo(activeMap);
+  const base = L.tileLayer(style.base, { maxZoom:19, attribution:style.attribution }).addTo(activeMap);
+  const wrap = el.closest(".mk-map-wrap");
+  const handoffSvg = wrap ? wrap.querySelector(".handoff svg") : null;
+  let tilesReady = false, tweenDone = !handoffSvg, shown = false;
+  const reveal = () => {
+    if (shown || !tilesReady || !tweenDone) return;
+    shown = true;
+    requestAnimationFrame(() => { wrap.classList.add("map-in"); setTimeout(() => { const h = wrap.querySelector(".handoff"); if (h) h.remove(); }, 900); });
+  };
+  if (wrap && landing){
+    base.once("load", () => { tilesReady = true; reveal(); });
+    setTimeout(() => { tilesReady = true; reveal(); }, 1600);          // don’t wait forever on slow tiles
+  } else if (wrap){ wrap.classList.remove("map-enter", "has-handoff"); const h = wrap.querySelector(".handoff"); if (h) h.remove(); }
+  state.handoff = null;
   L.tileLayer(style.ref, { maxZoom:19, pane:"overlayPane", opacity: state.mkLayer === "satellite" ? .9 : 1 }).addTo(activeMap);
   const pts = list.map(s => [s.lat, s.lng]);
   list.forEach(s => {
@@ -2505,12 +2552,171 @@ function initMarketMap(){
       <a href="#" data-action="open-site" data-code="${esc(s.code)}">Open Site</a></div>`);
     mk.on("mouseover", () => mk.setStyle({ radius:12 })); mk.on("mouseout", () => mk.setStyle({ radius:9 }));
   });
-  if (!pts.length){ activeMap.setView([m.lat, m.lng], 10); return; }
-  const bounds = L.latLngBounds(pts).pad(.25);
-  if (fly){
-    activeMap.setView([38.5, -96], 4, { animate:false });
-    setTimeout(() => { if (activeMap) activeMap.flyToBounds(bounds, { duration:1.4, maxZoom:13, padding:[24,24] }); }, 250);
-  } else activeMap.fitBounds(bounds, { maxZoom:13, padding:[24,24] });
+  if (!pts.length){ activeMap.setView([m.lat, m.lng], 10, { animate:false }); return; }
+  activeMap.fitBounds(L.latLngBounds(pts).pad(.25), { maxZoom:13, padding:[24,24], animate:false });
+  if (handoffSvg && landing) requestAnimationFrame(() => tweenHandoff(handoffSvg, activeMap, el).then(() => { tweenDone = true; reveal(); }));
+  else tweenDone = true;
+}
+
+
+/* ============================================================
+   MARKET ZOOM TRANSITION
+   Zooms the vector US map into a market (no map tiles involved,
+   so it stays smooth), then hands off to the street map, which
+   fades in over the zoomed frame only once its tiles have loaded.
+   ============================================================ */
+const SVGNS = "http://www.w3.org/2000/svg";
+function easeInOutCubic(t){ return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+/* A box around the market’s sites, in map units, with the national map’s aspect ratio */
+function marketBox(m){
+  if (GEO.status !== "ready" || !m) return null;
+  const pts = state.data.sites.filter(s => s.mk === m.id && s.lat != null).map(s => GEO.proj([s.lng, s.lat])).filter(Boolean);
+  if (!pts.length && m.lat != null){ const p = GEO.proj([m.lng, m.lat]); if (p) pts.push(p); }
+  if (!pts.length) return null;
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const W = GEO.box[2], H = GEO.box[3], aspect = W / H;
+  let w = Math.max(x1 - x0, W * .012) * 1.55, h = Math.max(y1 - y0, H * .012) * 1.55;   // close to where the street map lands
+  if (w / h > aspect) h = w / aspect; else w = h * aspect;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  return { box:[cx - w / 2, cy - h / 2, w, h], target:[cx, cy] };
+}
+/* Zoom the viewBox. Width changes geometrically (even-feeling zoom) and the market
+   keeps its place on screen while it drifts to center, so it never leaves the frame. */
+function animateViewBox(svg, from, to, target, ms, onFrame){
+  return new Promise(resolve => {
+    const u0 = [(target[0] - from[0]) / from[2], (target[1] - from[1]) / from[3]];
+    const u1 = [(target[0] - to[0]) / to[2], (target[1] - to[1]) / to[3]];
+    const start = performance.now();
+    function step(now){
+      const t = Math.min(1, (now - start) / ms), e = easeInOutCubic(t);
+      const w = from[2] * Math.pow(to[2] / from[2], e), h = from[3] * Math.pow(to[3] / from[3], e);
+      const ux = u0[0] + (u1[0] - u0[0]) * e, uy = u0[1] + (u1[1] - u0[1]) * e;
+      const vb = [target[0] - ux * w, target[1] - uy * h, w, h];
+      svg.setAttribute("viewBox", vb.map(v => v.toFixed(2)).join(" "));
+      if (onFrame) onFrame(e, vb);
+      if (t < 1) requestAnimationFrame(step); else resolve();
+    }
+    requestAnimationFrame(step);
+  });
+}
+function addSiteDots(svg, id){
+  const g = document.createElementNS(SVGNS, "g");
+  g.setAttribute("class", "zoom-sites");
+  const dots = state.data.sites.filter(s => s.mk === id && s.lat != null).map(s => {
+    const p = GEO.proj([s.lng, s.lat]); if (!p) return null;
+    const c = document.createElementNS(SVGNS, "circle");
+    c.setAttribute("cx", p[0].toFixed(2)); c.setAttribute("cy", p[1].toFixed(2)); c.setAttribute("r", "0");
+    c.style.fill = statusColor(s.status);
+    g.appendChild(c); return c;
+  }).filter(Boolean);
+  svg.appendChild(g);
+  return { g, dots };
+}
+function mapVisible(svg){
+  const r = svg.getBoundingClientRect();
+  return r.height > 0 && r.top < window.innerHeight * .7 && r.bottom > window.innerHeight * .25;
+}
+async function zoomIntoMarket(id){
+  const svg = document.querySelector(".usmap"), m = findMarket(id);
+  if (!svg || !m || GEO.status !== "ready" || reducedMotion() || state.animating || !mapVisible(svg)) return false;
+  const mb = marketBox(m); if (!mb) return false;
+  state.animating = true;
+  hideMapTip();
+  const rect = svg.getBoundingClientRect();
+  svg.style.height = `${rect.height}px`;
+  svg.classList.add("zooming");
+  svg.querySelectorAll(".st").forEach(p => p.classList.toggle("focus-st", m.states.includes(p.dataset.state)));
+  const { g, dots } = addSiteDots(svg, id);
+  await animateViewBox(svg, GEO.box, mb.box, mb.target, 1000, (e, vb) => {
+    const upp = vb[2] / rect.width;                                   // map units per screen pixel
+    dots.forEach(c => c.setAttribute("r", (5.5 * upp).toFixed(3)));  // constant on-screen size
+    g.style.opacity = Math.min(1, Math.max(0, (e - .3) / .45));
+  });
+  /* Keep this frame as the backdrop the street map fades in over */
+  const snap = svg.cloneNode(true);
+  snap.removeAttribute("style"); snap.removeAttribute("role"); snap.removeAttribute("aria-label");
+  snap.setAttribute("preserveAspectRatio", "xMidYMid slice");
+  snap.setAttribute("aria-hidden", "true");
+  snap.querySelectorAll("[data-action],[tabindex]").forEach(n => { n.removeAttribute("data-action"); n.removeAttribute("tabindex"); n.removeAttribute("role"); });
+  snap.querySelectorAll("[id]").forEach(n => n.setAttribute("id", "h-" + n.id));
+  snap.querySelectorAll("[filter]").forEach(n => n.setAttribute("filter", (n.getAttribute("filter") || "").replace("url(#", "url(#h-")));
+  snap.querySelectorAll(".sweep path").forEach(n => n.remove());
+  state.handoff = { id, svg:snap.outerHTML };
+  state.animating = false;
+  return true;
+}
+/* After the street map has framed the sites (still hidden), continue the vector zoom onto exactly
+   that picture, then the street map fades in over it. The national map’s projection tilts slightly
+   toward the coasts, so instead of matching edges we fit scale, rotation and offset to every site’s
+   pin position (a least-squares similarity fit) and animate into that. */
+function fitSimilarity(P, Q){
+  const n = P.length, pc = [0,0], qc = [0,0];
+  P.forEach(p => { pc[0] += p[0] / n; pc[1] += p[1] / n; }); Q.forEach(q => { qc[0] += q[0] / n; qc[1] += q[1] / n; });
+  let a = 0, b = 0, ss = 0;
+  P.forEach((p, i) => { const x = p[0] - pc[0], y = p[1] - pc[1], u = Q[i][0] - qc[0], v = Q[i][1] - qc[1]; a += x * u + y * v; b += x * v - y * u; ss += x * x + y * y; });
+  return { s: ss ? Math.hypot(a, b) / ss : 1, th: Math.atan2(b, a), pc, qc };
+}
+async function tweenHandoff(svg, map, el){
+  if (GEO.status !== "ready" || !svg || !map) return;
+  const cw = el.clientWidth || 1, ch = el.clientHeight || 1;
+  const sites = scopedSites().filter(s => s.lat != null);
+  const b = map.getBounds();
+  const ll = sites.map(s => [s.lng, s.lat]).concat([[b.getWest(), b.getNorth()], [b.getEast(), b.getNorth()], [b.getWest(), b.getSouth()], [b.getEast(), b.getSouth()]]);
+  const P = [], Q = [];
+  ll.forEach(c => { const p = GEO.proj(c); if (!p) return; const q = map.latLngToContainerPoint([c[1], c[0]]); P.push(p); Q.push([q.x, q.y]); });
+  if (P.length < 2) return;
+  const fit = fitSimilarity(P, Q);
+  /* Start: the current "slice" view expressed as the same kind of transform */
+  const [vx, vy, vw, vh] = svg.getAttribute("viewBox").split(/\s+/).map(Number);
+  const s0 = Math.max(cw / vw, ch / vh), ox = (cw - s0 * vw) / 2, oy = (ch - s0 * vh) / 2;
+  const c = fit.pc, q0 = [s0 * (c[0] - vx) + ox, s0 * (c[1] - vy) + oy], q1 = fit.qc;
+  /* Re-express the snapshot in pixels with one transform group (no visual change on frame one) */
+  const g = document.createElementNS(SVGNS, "g");
+  Array.from(svg.childNodes).forEach(n => { if (n.nodeName !== "defs") g.appendChild(n); });
+  svg.appendChild(g);
+  svg.setAttribute("viewBox", `0 0 ${cw} ${ch}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  const dots = g.querySelectorAll(".zoom-sites circle");
+  const apply = e => {
+    const sc = s0 * Math.pow(fit.s / s0, e), th = fit.th * e;
+    const qx = q0[0] + (q1[0] - q0[0]) * e, qy = q0[1] + (q1[1] - q0[1]) * e;
+    const A = sc * Math.cos(th), B = sc * Math.sin(th);
+    g.setAttribute("transform", `matrix(${A},${B},${-B},${A},${qx - (A * c[0] - B * c[1])},${qy - (B * c[0] + A * c[1])})`);
+    dots.forEach(d => d.setAttribute("r", ((5.5 + 3.5 * e) / sc).toFixed(4)));   // 5.5 px → the pins’ 9 px
+  };
+  apply(0);
+  await new Promise(resolve => {
+    const start = performance.now();
+    (function step(now){
+      const t = Math.min(1, (now - start) / 520);
+      apply(easeInOutCubic(t));
+      if (t < 1) requestAnimationFrame(step); else resolve();
+    })(start);
+  });
+}
+async function zoomOutFromMarket(id){
+  const svg = document.querySelector(".usmap"), m = findMarket(id);
+  if (!svg || !m || GEO.status !== "ready" || reducedMotion()) return;
+  const mb = marketBox(m); if (!mb) return;
+  const rect = svg.getBoundingClientRect();
+  svg.style.height = `${rect.height}px`;
+  svg.classList.add("zooming", "instant");
+  svg.querySelectorAll(".st").forEach(p => p.classList.toggle("focus-st", m.states.includes(p.dataset.state)));
+  svg.setAttribute("viewBox", mb.box.join(" "));
+  const { g, dots } = addSiteDots(svg, id);
+  void svg.getBoundingClientRect();
+  svg.classList.remove("instant");
+  await animateViewBox(svg, mb.box, GEO.box, mb.target, 850, (e, vb) => {
+    const upp = vb[2] / rect.width;
+    dots.forEach(c => c.setAttribute("r", (5.5 * upp).toFixed(3)));
+    g.style.opacity = Math.max(0, 1 - e / .6);
+  });
+  g.remove();
+  svg.setAttribute("viewBox", GEO.box.join(" "));
+  svg.classList.remove("zooming");
+  svg.querySelectorAll(".focus-st").forEach(p => p.classList.remove("focus-st"));
+  svg.style.height = "";
 }
 
 
@@ -3899,11 +4105,24 @@ document.addEventListener("click", async e => {
       state.filters = Object.assign(freshFilters(), { [el.dataset.key]: el.dataset.value });
       go("sites"); break;
     case "work-market": setMarket(el.dataset.market); go("sites"); break;
-    case "market-overview":
+    case "market-overview": {
+      if (state.animating) break;
       hideMapTip();
-      if (state.view !== "markets"){ state.view = "markets"; state.flyIn = true; }
-      setMarket(el.dataset.market); break;
-    case "all-markets": state.mkState = "all"; setMarket("all"); break;
+      const id = el.dataset.market;
+      if (state.view === "markets" && state.market === "all"){
+        const navAt = state.navCount;
+        await zoomIntoMarket(id);                                               // zoom the US map in first
+        if (state.navCount !== navAt || state.view !== "markets" || state.market !== "all"){ state.handoff = null; break; }   // they went elsewhere mid-zoom
+      }
+      if (state.view !== "markets"){ state.view = "markets"; }
+      state.landing = true;
+      setMarket(id); break;
+    }
+    case "all-markets": {
+      state.mkState = "all";
+      if (state.view === "markets" && state.market !== "all" && GEO.status === "ready") state.zoomOutFrom = state.market;   // zoom back out to the country
+      setMarket("all"); break;
+    }
     case "search-market": { const m = findMarket(el.dataset.market); if (m){ state.searchMarket = m.name; state.searchState = m.states[0]; go("hunts"); setTimeout(() => { const b = $("#sMarket"); if (b) b.focus(); }, 30); } break; }
     case "map-layer":
       if (state.mkLayer !== el.dataset.layer){
